@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,12 +38,13 @@ import (
 )
 
 type snapContainer struct {
-	Name    string `json:"name"`
-	State   int32  `json:"state"`
-	Floor   uint64 `json:"floor"`
-	Dynamic uint64 `json:"dynamic"`
-	SmUtil  uint64 `json:"sm_util"`
-	UUID    string `json:"uuid,omitempty"`
+	Name         string `json:"name"`
+	State        int32  `json:"state"`
+	Floor        uint64 `json:"floor"`
+	Dynamic      uint64 `json:"dynamic"`
+	SmUtil       uint64 `json:"sm_util"`
+	LastLaunchNs uint64 `json:"last_launch_ns"`
+	UUID         string `json:"uuid,omitempty"`
 }
 
 type snapLine struct {
@@ -82,20 +84,22 @@ func refreshContainers(hookPath string, cur map[string]*nvidia.ContainerUsage) m
 		klog.Errorf("scan: %v", err)
 		return cur
 	}
-	for name, old := range cur {
-		if _, ok := next[name]; !ok {
-			old.Close()
-		}
-	}
+	out := make(map[string]*nvidia.ContainerUsage, len(next))
+	// Keep existing mmaps stable; only add new / drop removed.
 	for name, neu := range next {
 		if old, ok := cur[name]; ok {
-			// Remap each heavy tick so we do not keep a stale fd mapping forever.
-			old.Close()
-			_ = neu
+			neu.Close() // discard duplicate mmap from rescan
+			out[name] = old
+			continue
 		}
-		_ = name
+		out[name] = neu
 	}
-	return next
+	for name, old := range cur {
+		if _, ok := out[name]; !ok {
+			old.Close()
+		}
+	}
+	return out
 }
 
 func main() {
@@ -152,14 +156,15 @@ func main() {
 		line := snapLine{Event: "policy", TUnixMs: time.Now().UnixMilli()}
 		for _, c := range containers {
 			sc := snapContainer{
-				Name:  c.ContainerName,
-				State: c.Info.GetComputeState(),
+				Name:         c.ContainerName,
+				State:        c.Info.GetComputeState(),
+				LastLaunchNs: c.Info.GetLastLaunchNs(),
 			}
 			for i := range c.Info.DeviceMax() {
 				if !c.Info.IsValidUUID(i) {
 					continue
 				}
-				sc.UUID = c.Info.DeviceUUID(i)
+				sc.UUID = strings.TrimRight(c.Info.DeviceUUID(i), "\x00")
 				floor := c.Info.GetFloorSmLimit(i)
 				if floor == 0 {
 					floor = c.Info.GetDeviceSmLimit(i)

@@ -86,8 +86,16 @@ go test ./cmd/vGPUmonitor/ ./pkg/monitor/nvidia/
 - **s3**: v1 `reclaim_latency_ms` small (order of light tick + watcher); after reclaim both near floor. Owner wakes **only** via signal file (not `--idle-sec` auto-wake)
 - **noisy**: prefer fewer wild `state_flips` / dynamic thrash on v1 with default hysteresis
 
-## Notes
+## Troubleshooting s2 (A idle / B busy, but no lending)
 
-- Needs one NVIDIA GPU, `nvcc`, `nvidia-smi`, and a built `libvgpu.so`.
-- No full Kubernetes cluster required for this harness (`feedback-lite` scans `HOOK_PATH/containers`).
-- Production path remains Go `vGPUmonitor`; this lite binary exists only for VM A/B.
+If `summary.json` shows both containers `state=3` (IDLE), `dynamic==floor`, while
+`nvidia-smi` util is high and B has large `iters`:
+
+1. **libvgpu did not see B's launches** → `last_launch_ns` stays 0 → monitor
+   treats B as never-active → IDLE → no ACTIVE borrower → no headroom grant.
+2. Rebuild sm_burn with legacy stream (already in Makefile):
+   `make build-sm-burn`
+3. Re-run and check `policy.jsonl`: busy worker should have growing
+   `last_launch_ns` and `state=1`. Idle worker `state=3`, busy `dynamic>floor`.
+
+`make clean` only removes `bin/`; use `make clean-all` to wipe `.run` logs.

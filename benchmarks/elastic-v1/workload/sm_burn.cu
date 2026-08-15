@@ -197,13 +197,16 @@ int main(int argc, char **argv) {
       burning = 1;
     }
 
-    if (burning) {
-      burn_kernel<<<blocks, threads>>>(d, n, ker_iters);
-      CHECK_CUDA(cudaGetLastError());
-      CHECK_CUDA(cudaDeviceSynchronize());
-      iters++;
-      iters_window++;
-    } else {
+  if (burning) {
+    /* Legacy default stream → cuLaunchKernel (hooked by libvgpu).
+     * Per-thread default stream uses cuLaunchKernel_ptsz, which libvgpu
+     * does not intercept — last_launch_ns stays 0 and elastic never sees ACTIVE. */
+    burn_kernel<<<blocks, threads, 0, cudaStreamLegacy>>>(d, n, ker_iters);
+    CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaDeviceSynchronize());
+    iters++;
+    iters_window++;
+  } else {
       usleep(20 * 1000);
     }
 
