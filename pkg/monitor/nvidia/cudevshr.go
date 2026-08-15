@@ -227,6 +227,53 @@ func (l *ContainerLister) Update() error {
 	return nil
 }
 
+// Close unmaps the shared-region mapping, if any.
+func (c *ContainerUsage) Close() {
+	if c == nil || c.data == nil {
+		return
+	}
+	_ = syscall.Munmap(c.data)
+	c.data = nil
+	c.Info = nil
+}
+
+// LoadContainerCache maps a container directory's .cache file (exported for harness).
+func LoadContainerCache(dirName string) (*ContainerUsage, error) {
+	return loadCache(dirName)
+}
+
+// ScanHookContainers loads all live caches under hookPath/containers without Kubernetes.
+// Callers must Close() usages they drop. Used by elastic-v1 feedback-lite on GPU VMs.
+func ScanHookContainers(hookPath string) (map[string]*ContainerUsage, error) {
+	containerPath := filepath.Join(hookPath, "containers")
+	entries, err := os.ReadDir(containerPath)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*ContainerUsage)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dirName := filepath.Join(containerPath, entry.Name())
+		usage, err := loadCache(dirName)
+		if err != nil {
+			klog.Errorf("Failed to load cache: %s, error: %v", dirName, err)
+			continue
+		}
+		if usage == nil {
+			continue
+		}
+		parts := strings.SplitN(entry.Name(), "_", 2)
+		usage.PodUID = parts[0]
+		if len(parts) > 1 {
+			usage.ContainerName = parts[1]
+		}
+		out[entry.Name()] = usage
+	}
+	return out, nil
+}
+
 func loadCache(fpath string) (*ContainerUsage, error) {
 	klog.Infof("Checking path %s", fpath)
 	files, err := os.ReadDir(fpath)

@@ -1,0 +1,3 @@
+{"event":"policy","t_unix_ms":1000,"containers":[{"name":"A","state":3,"floor":40,"dynamic":40,"sm_util":0},{"name":"B","state":1,"floor":40,"dynamic":80,"sm_util":70}]}
+{"event":"policy","t_unix_ms":1200,"containers":[{"name":"A","state":3,"floor":40,"dynamic":40,"sm_util":0},{"name":"B","state":1,"floor":40,"dynamic":80,"sm_util":72}]}
+{"event":"policy","t_unix_ms":1400,"containers":[{"name":"A","state":1,"floor":40,"dynamic":40,"sm_util":40},{"name":"B","state":1,"floor":40,"dynamic":40,"sm_util":40}]}

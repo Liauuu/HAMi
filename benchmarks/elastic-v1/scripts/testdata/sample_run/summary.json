@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "variant": "v1",
+    "scenario": "s2",
+    "floor_sm": 40,
+    "duration_s": 2,
+    "libvgpu": "/dev/null",
+    "run_id": "sample"
+  },
+  "workers": {
+    "A": {
+      "ticks": 1,
+      "mode_changes": 0,
+      "median_busy_iters_per_s": null,
+      "mean_busy_iters_per_s": null,
+      "total_iters": 0
+    },
+    "B": {
+      "ticks": 2,
+      "mode_changes": 0,
+      "median_busy_iters_per_s": 510.0,
+      "mean_busy_iters_per_s": 510.0,
+      "total_iters": 200
+    }
+  },
+  "policy": {
+    "samples": 3,
+    "containers": {
+      "A": {
+        "samples": 3,
+        "median_dynamic": 40.0,
+        "max_dynamic": 40.0,
+        "median_sm_util": 0.0,
+        "dynamic_below_floor_ratio": 0.0,
+        "sm_util_above_floor_ratio": 0.0,
+        "state_flips": 1,
+        "median_floor": 40.0
+      },
+      "B": {
+        "samples": 3,
+        "median_dynamic": 80.0,
+        "max_dynamic": 80.0,
+        "median_sm_util": 70.0,
+        "dynamic_below_floor_ratio": 0.0,
+        "sm_util_above_floor_ratio": 0.6666666666666666,
+        "state_flips": 0,
+        "median_floor": 40.0
+      }
+    }
+  },
+  "nvsmi": {
+    "median_gpu_util": 58.0,
+    "mean_gpu_util": 57.666666666666664,
+    "samples": 3
+  },
+  "reclaim_latency_ms": null
+}
