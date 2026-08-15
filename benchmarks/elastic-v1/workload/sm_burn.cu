@@ -68,9 +68,9 @@ __global__ void burn_kernel(float *data, int n, int iters) {
   data[tid] = x;
 }
 
-typedef enum { MODE_BUSY, MODE_IDLE, MODE_NOISY, MODE_OWNER } mode_t;
+typedef enum { MODE_BUSY, MODE_IDLE, MODE_NOISY, MODE_OWNER } workload_mode_t;
 
-static mode_t parse_mode(const char *s) {
+static workload_mode_t parse_mode(const char *s) {
   if (!strcmp(s, "busy"))
     return MODE_BUSY;
   if (!strcmp(s, "idle"))
@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  mode_t mode = parse_mode(mode_s);
+  workload_mode_t mode = parse_mode(mode_s);
   CHECK_CUDA(cudaSetDevice(device));
 
   float *d;
