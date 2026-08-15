@@ -80,7 +80,14 @@ type sharedRegionT struct {
 	recentKernel      int32
 	priority          int32
 	lastKernelTime    int64
-	unused            [4]uint64
+	unused            [4]uint64 // mirrors libvgpu sem_postinit (sizeof(sem_t)==32)
+	// Elastic SM limit ABI (libvgpu shared_region_t minor >= 3).
+	// Stored only in step-1; limiter/monitor do not consume these yet.
+	computeState     int32
+	computeStatePad  int32
+	lastLaunchNs     uint64
+	floorSmLimit     [16]uint64
+	dynamicSmLimit   [16]uint64
 }
 
 type Spec struct {
