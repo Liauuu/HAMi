@@ -54,6 +54,9 @@ run_worker() {
     export CUDA_DEVICE_SM_LIMIT="${FLOOR_SM}"
     export GPU_CORE_UTILIZATION_POLICY="${GPU_CORE_UTILIZATION_POLICY:-force}"
     export LD_PRELOAD="${LIBVGPU}"
+    # libvgpu's dlsym() rewrites cu* lookups via this path (default
+    # /usr/local/vgpu/libvgpu.so is usually missing on bare VM).
+    export CUDA_REDIRECT="${LIBVGPU}"
     # Prefer per-container cache under hook path (set by libvgpu via POD_UID).
     unset CUDA_DEVICE_MEMORY_SHARED_CACHE || true
     exec "${SM_BURN}" --name="${name}" --mode="${mode}" --duration="${DURATION_S}" "$@"

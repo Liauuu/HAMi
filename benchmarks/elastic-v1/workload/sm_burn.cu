@@ -7,15 +7,17 @@
  *   noisy  short busy bursts then sleep (oscillation probe)
  *   owner  idle until signal file appears, then busy (S3 reclaim)
  *
- * Example:
- *   ./sm_burn --mode=busy --duration=30 --report-ms=200
- *   ./sm_burn --mode=owner --duration=40 --signal-file=/tmp/wake_a --idle-sec=10
+ * Launch path: CUDA Driver API cuLaunchKernel (not runtime <<<>>>).
+ * cudart caches real libcuda pointers via dlsym and bypasses LD_PRELOAD
+ * interposition; calling cuLaunchKernel from this binary hits libvgpu's
+ * hooked export so mark_compute_active / last_launch_ns work.
  *
- * JSON lines on stdout:
- *   {"event":"tick","name":"A","mode":"busy","iters":1234,"iters_per_s":617.0,"t_s":2.0}
- *   {"event":"mode","name":"A","mode":"busy","t_s":10.01}
+ * Example:
+ *   LD_PRELOAD=./libvgpu.so CUDA_REDIRECT=./libvgpu.so \
+ *     ./sm_burn --mode=busy --duration=30 --report-ms=200
  */
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 #include <errno.h>
 #include <getopt.h>
@@ -32,6 +34,18 @@
     if (_e != cudaSuccess) {                                                   \
       fprintf(stderr, "CUDA %s:%d: %s\n", __FILE__, __LINE__,                  \
               cudaGetErrorString(_e));                                         \
+      exit(1);                                                                 \
+    }                                                                          \
+  } while (0)
+
+#define CHECK_DRV(call)                                                        \
+  do {                                                                         \
+    CUresult _e = (call);                                                      \
+    if (_e != CUDA_SUCCESS) {                                                  \
+      const char *_s = NULL;                                                   \
+      cuGetErrorString(_e, &_s);                                               \
+      fprintf(stderr, "CUDA driver %s:%d: %s\n", __FILE__, __LINE__,           \
+              _s ? _s : "unknown");                                            \
       exit(1);                                                                 \
     }                                                                          \
   } while (0)
@@ -85,6 +99,14 @@ static void emit_mode(const char *name, const char *mode, double t) {
   printf("{\"event\":\"mode\",\"name\":\"%s\",\"mode\":\"%s\",\"t_s\":%.3f}\n",
          name, mode, t);
   fflush(stdout);
+}
+
+static void launch_burn(CUfunction fn, float *d, int n, int ker_iters,
+                        int blocks, int threads) {
+  void *args[] = {&d, &n, &ker_iters};
+  CHECK_DRV(cuLaunchKernel(fn, (unsigned)blocks, 1, 1, (unsigned)threads, 1, 1,
+                           0, NULL, args, NULL));
+  CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 int main(int argc, char **argv) {
@@ -157,6 +179,14 @@ int main(int argc, char **argv) {
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
 
+  /* Resolve runtime kernel to a CUfunction, then launch via Driver API. */
+  CUfunction burn_fn = NULL;
+  CHECK_CUDA(cudaGetFuncBySymbol(&burn_fn, (const void *)burn_kernel));
+  if (burn_fn == NULL) {
+    fprintf(stderr, "cudaGetFuncBySymbol returned NULL\n");
+    return 1;
+  }
+
   double t0 = now_s();
   double last_report = t0;
   long long iters = 0;
@@ -197,16 +227,11 @@ int main(int argc, char **argv) {
       burning = 1;
     }
 
-  if (burning) {
-    /* Legacy default stream → cuLaunchKernel (hooked by libvgpu).
-     * Per-thread default stream uses cuLaunchKernel_ptsz, which libvgpu
-     * does not intercept — last_launch_ns stays 0 and elastic never sees ACTIVE. */
-    burn_kernel<<<blocks, threads, 0, cudaStreamLegacy>>>(d, n, ker_iters);
-    CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaDeviceSynchronize());
-    iters++;
-    iters_window++;
-  } else {
+    if (burning) {
+      launch_burn(burn_fn, d, n, ker_iters, blocks, threads);
+      iters++;
+      iters_window++;
+    } else {
       usleep(20 * 1000);
     }
 

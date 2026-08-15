@@ -88,14 +88,34 @@ go test ./cmd/vGPUmonitor/ ./pkg/monitor/nvidia/
 
 ## Troubleshooting s2 (A idle / B busy, but no lending)
 
-If `summary.json` shows both containers `state=3` (IDLE), `dynamic==floor`, while
-`nvidia-smi` util is high and B has large `iters`:
+If `summary.json` shows both containers `state=3` (IDLE), `last_launch_ns=0`,
+while `nvidia-smi` util is high:
 
-1. **libvgpu did not see B's launches** → `last_launch_ns` stays 0 → monitor
-   treats B as never-active → IDLE → no ACTIVE borrower → no headroom grant.
-2. Rebuild sm_burn with legacy stream (already in Makefile):
-   `make build-sm-burn`
-3. Re-run and check `policy.jsonl`: busy worker should have growing
-   `last_launch_ns` and `state=1`. Idle worker `state=3`, busy `dynamic>floor`.
+**Root cause:** cudart resolves `cuLaunchKernel` via `dlsym(libcuda)` and
+caches the *real* driver pointer. LD_PRELOAD alone does not see those launches,
+so `mark_compute_active` never runs.
+
+**Harness fix:** `sm_burn` calls Driver API `cuLaunchKernel` itself (PLT →
+libvgpu). `run_worker` also sets `CUDA_REDIRECT=$LIBVGPU`.
+
+```bash
+make build-sm-burn
+# quick hook smoke (stderr should stay quiet; last_launch must become non-zero):
+HOOK_BASE=$(pwd)/.run/hook
+mkdir -p "$HOOK_BASE/containers/bench-B_B"
+CONTAINER_VGPU_MOUNT=$HOOK_BASE HOOK_PATH=$HOOK_BASE \
+  POD_UID=bench-B CONTAINER_NAME=B \
+  CUDA_DEVICE_MEMORY_LIMIT=2g CUDA_DEVICE_SM_LIMIT=40 \
+  GPU_CORE_UTILIZATION_POLICY=force \
+  LD_PRELOAD=$LIBVGPU CUDA_REDIRECT=$LIBVGPU \
+  ./bin/sm_burn --name=B --mode=busy --duration=2
+# while it runs in another shell, or after: check usage.cache via feedback-lite
+VARIANT=v1 SCENARIO=s2 ./scripts/run_scenario.sh
+```
+
+Expect mid-run policy: A `state=3` `dynamic=40`; B `state=1` `last_launch_ns>0` `dynamic>40`.
 
 `make clean` only removes `bin/`; use `make clean-all` to wipe `.run` logs.
+
+Do **not** hand-edit HAMi-core `memory.c` includes for this harness; rebuild from a
+clean cmake tree (`./build.sh`) if `libvgpu` fails to compile.

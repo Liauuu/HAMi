@@ -21,8 +21,9 @@ build-sm-burn: $(BIN)/sm_burn
 
 $(BIN)/sm_burn: workload/sm_burn.cu
 	mkdir -p $(BIN)
-	# --default-stream legacy: force cuLaunchKernel (not _ptsz) so LD_PRELOAD libvgpu sees launches
-	nvcc -O2 --default-stream legacy -o $@ $<
+	# Link libcudart + libcuda so cuLaunchKernel is a PLT symbol that LD_PRELOAD
+	# libvgpu can interpose (cudart-internal launches bypass hooks).
+	nvcc -O2 --cudart shared -lcuda -o $@ $<
 
 build-feedback-lite: $(BIN)/feedback-lite
 
