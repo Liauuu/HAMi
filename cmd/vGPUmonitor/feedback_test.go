@@ -32,15 +32,17 @@ const stubDeviceMax = 16
 // count and the trailing slots read back invalid, so the check functions walk the
 // same 16 slots they do in production.
 type stubInfo struct {
-	priority       int
-	uuids          []string
-	computeState   int32
-	lastLaunchNs   uint64
-	setStateCalls  int
-	lastSetStateTo int32
-	floorSmLimit   [stubDeviceMax]uint64
-	smLimit        [stubDeviceMax]uint64
-	dynamicSmLimit [stubDeviceMax]uint64
+	priority           int
+	uuids              []string
+	computeState       int32
+	lastLaunchNs       uint64
+	setStateCalls      int
+	lastSetStateTo     int32
+	recentKernel       int32
+	setRecentKernelN   int
+	floorSmLimit       [stubDeviceMax]uint64
+	smLimit            [stubDeviceMax]uint64
+	dynamicSmLimit     [stubDeviceMax]uint64
 }
 
 func (s *stubInfo) DeviceMax() int { return stubDeviceMax }
@@ -63,8 +65,11 @@ func (s *stubInfo) DeviceMemoryLimit(int) uint64       { return 0 }
 func (s *stubInfo) SetDeviceMemoryLimit(uint64)        {}
 func (s *stubInfo) LastKernelTime() int64              { return 0 }
 func (s *stubInfo) GetPriority() int                   { return s.priority }
-func (s *stubInfo) GetRecentKernel() int32             { return 1 }
-func (s *stubInfo) SetRecentKernel(int32)              {}
+func (s *stubInfo) GetRecentKernel() int32 { return s.recentKernel }
+func (s *stubInfo) SetRecentKernel(v int32) {
+	s.setRecentKernelN++
+	s.recentKernel = v
+}
 func (s *stubInfo) GetUtilizationSwitch() int32        { return 0 }
 func (s *stubInfo) SetUtilizationSwitch(int32)         {}
 func (s *stubInfo) GetComputeState() int32             { return s.computeState }
@@ -500,5 +505,55 @@ func TestApplyDynamicLimit_NeverBelowFloor(t *testing.T) {
 	applyDynamicLimitWith(m, 10, 0)
 	if info.dynamicSmLimit[0] != 40 {
 		t.Fatalf("dynamic=%d, want floor 40", info.dynamicSmLimit[0])
+	}
+}
+
+func TestClampTickMs(t *testing.T) {
+	if got := clampTickMs("HAMI_COMPUTE_LIGHT_TICK_MS_UNSET_TEST", 200, 50, 0); got != 200*time.Millisecond {
+		t.Fatalf("default light tick=%v, want 200ms", got)
+	}
+	t.Setenv("HAMI_COMPUTE_LIGHT_TICK_MS_CLAMP_LOW", "10")
+	if got := clampTickMs("HAMI_COMPUTE_LIGHT_TICK_MS_CLAMP_LOW", 200, 50, 0); got != 50*time.Millisecond {
+		t.Fatalf("below-min clamp=%v, want 50ms", got)
+	}
+	t.Setenv("HAMI_COMPUTE_HEAVY_TICK_MS_CLAMP_HIGH", "99999")
+	if got := clampTickMs("HAMI_COMPUTE_HEAVY_TICK_MS_CLAMP_HIGH", 5000, 1000, 10000); got != 10*time.Second {
+		t.Fatalf("above-max clamp=%v, want 10s", got)
+	}
+}
+
+// Light path must not touch recent_kernel (decrement is heavy-tick only).
+func TestObserveComputePolicy_DoesNotTouchRecentKernel(t *testing.T) {
+	a, aInfo := newGPUContainer("idle", "gpu-0", computeStateIdle, 40, 40)
+	b, bInfo := newGPUContainer("busy", "gpu-0", computeStateActive, 40, 40)
+	aInfo.lastLaunchNs = 0
+	aInfo.recentKernel = 2
+	bInfo.lastLaunchNs = monotonicNowNs()
+	bInfo.recentKernel = 2
+
+	observeComputePolicy(map[string]*nvidia.ContainerUsage{"idle": a, "busy": b})
+
+	if aInfo.setRecentKernelN != 0 || bInfo.setRecentKernelN != 0 {
+		t.Fatalf("light path must not SetRecentKernel (idle=%d busy=%d)",
+			aInfo.setRecentKernelN, bInfo.setRecentKernelN)
+	}
+	if aInfo.recentKernel != 2 || bInfo.recentKernel != 2 {
+		t.Fatalf("recent_kernel mutated on light path: idle=%d busy=%d", aInfo.recentKernel, bInfo.recentKernel)
+	}
+	if bInfo.dynamicSmLimit[0] <= 40 {
+		t.Fatalf("ACTIVE busy should receive headroom, dynamic=%d", bInfo.dynamicSmLimit[0])
+	}
+	if aInfo.dynamicSmLimit[0] != 40 {
+		t.Fatalf("IDLE should stay at floor, dynamic=%d", aInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestObservePriorityFeedback_DecrementsRecentKernel(t *testing.T) {
+	c, info := newGPUContainer("x", "gpu-0", computeStateActive, 40, 40)
+	info.recentKernel = 2
+	observePriorityFeedback(map[string]*nvidia.ContainerUsage{"x": c})
+	if info.setRecentKernelN == 0 || info.recentKernel != 1 {
+		t.Fatalf("heavy path should decrement recent_kernel to 1, got calls=%d value=%d",
+			info.setRecentKernelN, info.recentKernel)
 	}
 }

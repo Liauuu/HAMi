@@ -47,6 +47,15 @@ const (
 	defaultBurstCap        = 85
 	defaultGrantStep       = 10
 	cardCoreCapacity       = 100
+
+	// Light tick: compute_state + dynamic_sm_limit only (shared-memory R/W).
+	// Keep this in the 100–200ms band; do not pull heavy work onto it.
+	defaultLightTickMs = 200
+	minLightTickMs     = 50
+	// Heavy tick: container-dir/pod refresh (+ legacy priority/recent_kernel).
+	// NVML Init stays once at start; metrics NVML stays on its own path.
+	defaultHeavyTickMs = 5000
+	minHeavyTickMs     = 1000
 )
 
 //type hostGPUPid struct {
@@ -61,6 +70,8 @@ var (
 	idleThresholdNs uint64
 	burstCap        uint64
 	grantStep       uint64
+	lightTick       time.Duration
+	heavyTick       time.Duration
 )
 
 func init() {
@@ -75,6 +86,27 @@ func init() {
 		burstCap = defaultBurstCap
 	}
 	grantStep = uint64(envDurationMs("HAMI_COMPUTE_GRANT_STEP", defaultGrantStep))
+
+	lightTick = clampTickMs("HAMI_COMPUTE_LIGHT_TICK_MS", defaultLightTickMs, minLightTickMs, 0)
+	heavyTick = clampTickMs("HAMI_COMPUTE_HEAVY_TICK_MS", defaultHeavyTickMs, minHeavyTickMs, 0)
+	if lightTick >= heavyTick {
+		klog.Warningf("HAMI_COMPUTE_LIGHT_TICK_MS (%v) >= HEAVY (%v); light path still skips Update()", lightTick, heavyTick)
+	}
+}
+
+// clampTickMs parses an env duration in milliseconds and clamps to [minMs, maxMs]
+// (maxMs<=0 means no upper bound).
+func clampTickMs(name string, def, minMs, maxMs int) time.Duration {
+	v := envDurationMs(name, def)
+	if v < minMs {
+		klog.Warningf("invalid %s=%d (< %d), using %d", name, v, minMs, minMs)
+		v = minMs
+	}
+	if maxMs > 0 && v > maxMs {
+		klog.Warningf("invalid %s=%d (> %d), using %d", name, v, maxMs, maxMs)
+		v = maxMs
+	}
+	return time.Duration(v) * time.Millisecond
 }
 
 func envDurationMs(name string, def int) int {
@@ -355,10 +387,29 @@ func redistributeHeadroomWith(containers map[string]*nvidia.ContainerUsage, cap,
 	}
 }
 
+// Observe runs the full feedback pass (legacy priority + compute elastic).
+// Prefer observeComputePolicy on the light tick so recent_kernel's per-tick
+// decrement keeps its historical ~5s timescale.
 func Observe(lister *nvidia.ContainerLister) {
-	utSwitchOn := map[string]UtilizationPerDevice{}
 	containers := lister.ListContainers()
+	observePriorityFeedback(containers)
+	observeComputePolicy(containers)
+}
+
+// observeComputePolicy: light work only — hysteresis state + dynamic limits.
+// Candidate never contributes headroom; reclaim is immediate, grant is stepped.
+func observeComputePolicy(containers map[string]*nvidia.ContainerUsage) {
 	nowNs := monotonicNowNs()
+	for _, c := range containers {
+		updateComputeState(c, nowNs)
+	}
+	redistributeHeadroom(containers)
+}
+
+// observePriorityFeedback: legacy recent_kernel / utilization_switch path.
+// recent_kernel is decremented once per call; keep this on the heavy tick.
+func observePriorityFeedback(containers map[string]*nvidia.ContainerUsage) {
+	utSwitchOn := map[string]UtilizationPerDevice{}
 
 	for _, c := range containers {
 		recentKernel := c.Info.GetRecentKernel()
@@ -386,8 +437,6 @@ func Observe(lister *nvidia.ContainerLister) {
 		}
 	}
 	for idx, c := range containers {
-		updateComputeState(c, nowNs)
-
 		priority := c.Info.GetPriority()
 		recentKernel := c.Info.GetRecentKernel()
 		utilizationSwitch := c.Info.GetUtilizationSwitch()
@@ -418,20 +467,24 @@ func Observe(lister *nvidia.ContainerLister) {
 			}
 		}
 	}
-
-	// After states settle: lend IDLE headroom to ACTIVE on the same GPU.
-	redistributeHeadroom(containers)
 }
 
 func watchAndFeedback(ctx context.Context, lister *nvidia.ContainerLister, migLockSignal <-chan bool) error {
-	klog.Info("Starting watchAndFeedback")
+	klog.Infof("Starting watchAndFeedback (light=%v heavy=%v; no C++ monitor)", lightTick, heavyTick)
 	if nvret := nvml.Init(); nvret != nvml.SUCCESS {
 		return fmt.Errorf("failed to initialize NVML: %s", nvml.ErrorString(nvret))
 	}
 	defer nvml.Shutdown()
 
-	ticker := time.NewTicker(time.Second * 5)
-	defer ticker.Stop()
+	// Prime container map so the first light tick is not a no-op.
+	if err := lister.Update(); err != nil {
+		klog.Errorf("Failed initial container list update: %v", err)
+	}
+
+	lightTicker := time.NewTicker(lightTick)
+	defer lightTicker.Stop()
+	heavyTicker := time.NewTicker(heavyTick)
+	defer heavyTicker.Stop()
 
 	for {
 		select {
@@ -444,7 +497,12 @@ func watchAndFeedback(ctx context.Context, lister *nvidia.ContainerLister, migLo
 				return errTemporaryClosed
 			}
 
-		case <-ticker.C:
+		case <-lightTicker.C:
+			// Shared-memory only: state transitions + dynamic writes.
+			// Watcher re-reads effective limit every libvgpu tick independently.
+			observeComputePolicy(lister.ListContainers())
+
+		case <-heavyTicker.C:
 			if err := lister.Update(); err != nil {
 				klog.Errorf("Failed to update container list: %v", err)
 				continue
