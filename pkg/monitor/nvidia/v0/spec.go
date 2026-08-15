@@ -197,3 +197,14 @@ func (s Spec) SetComputeState(int32)  {}
 func (s Spec) GetLastLaunchNs() uint64 {
 	return 0
 }
+func (s Spec) GetDeviceSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= maxDevices {
+		return 0
+	}
+	return s.sr.smLimit[idx]
+}
+func (s Spec) GetFloorSmLimit(int) uint64 { return 0 }
+func (s Spec) GetDynamicSmLimit(int) uint64 {
+	return 0
+}
+func (s Spec) SetDynamicSmLimit(int, uint64) {}

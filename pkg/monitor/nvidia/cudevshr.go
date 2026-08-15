@@ -74,6 +74,10 @@ type UsageInfo interface {
 	GetComputeState() int32
 	SetComputeState(v int32)
 	GetLastLaunchNs() uint64
+	GetDeviceSmLimit(idx int) uint64
+	GetFloorSmLimit(idx int) uint64
+	GetDynamicSmLimit(idx int) uint64
+	SetDynamicSmLimit(idx int, v uint64)
 }
 
 type ContainerUsage struct {

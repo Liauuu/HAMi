@@ -38,6 +38,9 @@ type stubInfo struct {
 	lastLaunchNs   uint64
 	setStateCalls  int
 	lastSetStateTo int32
+	floorSmLimit   [stubDeviceMax]uint64
+	smLimit        [stubDeviceMax]uint64
+	dynamicSmLimit [stubDeviceMax]uint64
 }
 
 func (s *stubInfo) DeviceMax() int { return stubDeviceMax }
@@ -71,6 +74,41 @@ func (s *stubInfo) SetComputeState(v int32) {
 	s.computeState = v
 }
 func (s *stubInfo) GetLastLaunchNs() uint64 { return s.lastLaunchNs }
+func (s *stubInfo) GetDeviceSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= stubDeviceMax {
+		return 0
+	}
+	return s.smLimit[idx]
+}
+func (s *stubInfo) GetFloorSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= stubDeviceMax {
+		return 0
+	}
+	return s.floorSmLimit[idx]
+}
+func (s *stubInfo) GetDynamicSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= stubDeviceMax {
+		return 0
+	}
+	return s.dynamicSmLimit[idx]
+}
+func (s *stubInfo) SetDynamicSmLimit(idx int, v uint64) {
+	if idx < 0 || idx >= stubDeviceMax {
+		return
+	}
+	s.dynamicSmLimit[idx] = v
+}
+
+func newGPUContainer(name, uuid string, state int32, floor, dynamic uint64) (*nvidia.ContainerUsage, *stubInfo) {
+	info := &stubInfo{
+		uuids:        []string{uuid},
+		computeState: state,
+	}
+	info.floorSmLimit[0] = floor
+	info.smLimit[0] = floor
+	info.dynamicSmLimit[0] = dynamic
+	return &nvidia.ContainerUsage{PodUID: name, ContainerName: name, Info: info}, info
+}
 
 func TestCheckFunctionsHighPriority(t *testing.T) {
 	sw := map[string]UtilizationPerDevice{"gpu-0": {0, 1}}
@@ -315,5 +353,152 @@ func TestUpdateComputeState_ThresholdSanity(t *testing.T) {
 	updateComputeStateWith(c, now, 2000*uint64(time.Millisecond), 1000*uint64(time.Millisecond))
 	if info.computeState != computeStateActive {
 		t.Fatalf("with clamped thresholds, 1.5s idle should stay ACTIVE, got %d", info.computeState)
+	}
+}
+
+func TestRedistributeHeadroom_IdleLendsToActiveWithCap(t *testing.T) {
+	// S2-style: A idle floor=40, B active floor=40. Share=40 -> raw 80, cap=85 -> 80.
+	// Sum=120 > 100, so clamp cuts B surplus by 20 -> B=60, A=40.
+	a, aInfo := newGPUContainer("A", "gpu-0", computeStateIdle, 40, 40)
+	b, bInfo := newGPUContainer("B", "gpu-0", computeStateActive, 40, 40)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{"A": a, "B": b}, 85, 0, 100)
+
+	if aInfo.dynamicSmLimit[0] != 40 {
+		t.Fatalf("IDLE A dynamic=%d, want floor 40", aInfo.dynamicSmLimit[0])
+	}
+	if bInfo.dynamicSmLimit[0] != 60 {
+		t.Fatalf("ACTIVE B dynamic=%d, want 60 after Σ<=100 clamp (raw would be 80)", bInfo.dynamicSmLimit[0])
+	}
+	if aInfo.dynamicSmLimit[0]+bInfo.dynamicSmLimit[0] > 100 {
+		t.Fatalf("sum=%d exceeds capacity", aInfo.dynamicSmLimit[0]+bInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_CandidateDoesNotContribute(t *testing.T) {
+	a, aInfo := newGPUContainer("A", "gpu-0", computeStateIdleCandidate, 40, 40)
+	b, bInfo := newGPUContainer("B", "gpu-0", computeStateActive, 60, 60)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{"A": a, "B": b}, 85, 0, 100)
+
+	if aInfo.dynamicSmLimit[0] != 40 {
+		t.Fatalf("CANDIDATE A dynamic=%d, want floor 40", aInfo.dynamicSmLimit[0])
+	}
+	if bInfo.dynamicSmLimit[0] != 60 {
+		t.Fatalf("ACTIVE B dynamic=%d, want unchanged floor 60 (no idle headroom)", bInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_BothActiveNoBorrow(t *testing.T) {
+	a, aInfo := newGPUContainer("A", "gpu-0", computeStateActive, 40, 40)
+	b, bInfo := newGPUContainer("B", "gpu-0", computeStateActive, 60, 60)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{"A": a, "B": b}, 85, 0, 100)
+
+	if aInfo.dynamicSmLimit[0] != 40 || bInfo.dynamicSmLimit[0] != 60 {
+		t.Fatalf("both ACTIVE should keep floors, got A=%d B=%d", aInfo.dynamicSmLimit[0], bInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_EqualShareAmongActivesThenClamp(t *testing.T) {
+	// Idle 40 + two actives 30/30. Share=20 -> targets 50/50/40 = 140, clamp to 100
+	// by removing all surplus -> back to 30/30/40.
+	idle, idleInfo := newGPUContainer("idle", "gpu-0", computeStateIdle, 40, 40)
+	a1, a1Info := newGPUContainer("a1", "gpu-0", computeStateActive, 30, 30)
+	a2, a2Info := newGPUContainer("a2", "gpu-0", computeStateActive, 30, 30)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{
+		"idle": idle, "a1": a1, "a2": a2,
+	}, 85, 0, 100)
+
+	if idleInfo.dynamicSmLimit[0] != 40 {
+		t.Fatalf("idle dynamic=%d, want 40", idleInfo.dynamicSmLimit[0])
+	}
+	if a1Info.dynamicSmLimit[0] != 30 || a2Info.dynamicSmLimit[0] != 30 {
+		t.Fatalf("actives should clamp back to floors when card already full, got %d/%d",
+			a1Info.dynamicSmLimit[0], a2Info.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_BurstCapAppliedBeforeClamp(t *testing.T) {
+	// Idle 50, active floor 20. Share=50 -> raw 70, cap=65 -> 65. Sum=115 -> clamp
+	// surplus on active=45, overflow=15 -> active=50. Idle stays 50.
+	idle, idleInfo := newGPUContainer("idle", "gpu-0", computeStateIdle, 50, 50)
+	active, activeInfo := newGPUContainer("busy", "gpu-0", computeStateActive, 20, 20)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{
+		"idle": idle, "busy": active,
+	}, 65, 0, 100)
+
+	if idleInfo.dynamicSmLimit[0] != 50 {
+		t.Fatalf("idle=%d, want 50", idleInfo.dynamicSmLimit[0])
+	}
+	if activeInfo.dynamicSmLimit[0] != 50 {
+		t.Fatalf("active=%d, want 50 after cap+clamp", activeInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_ImmediateReclaim(t *testing.T) {
+	// Previously borrowed (dynamic=80). Owner becomes ACTIVE too -> no headroom,
+	// must drop to floor immediately even if grantStep would otherwise slow changes.
+	a, aInfo := newGPUContainer("A", "gpu-0", computeStateActive, 50, 50)
+	b, bInfo := newGPUContainer("B", "gpu-0", computeStateActive, 50, 80)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{"A": a, "B": b}, 85, 10, 100)
+
+	if aInfo.dynamicSmLimit[0] != 50 {
+		t.Fatalf("A=%d, want 50", aInfo.dynamicSmLimit[0])
+	}
+	if bInfo.dynamicSmLimit[0] != 50 {
+		t.Fatalf("B reclaim should be immediate to floor 50, got %d (grantStep must not delay reductions)", bInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_MildGrant(t *testing.T) {
+	idle, _ := newGPUContainer("idle", "gpu-0", computeStateIdle, 40, 40)
+	busy, busyInfo := newGPUContainer("busy", "gpu-0", computeStateActive, 40, 40)
+
+	// Raw target after clamp: busy wants 60. With step=10 -> 50.
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{"idle": idle, "busy": busy}, 85, 10, 100)
+
+	if busyInfo.dynamicSmLimit[0] != 50 {
+		t.Fatalf("mild grant: busy=%d, want 50 (floor 40 + step 10 toward target 60)", busyInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_AllIdleNoActiveNoPanic(t *testing.T) {
+	a, aInfo := newGPUContainer("A", "gpu-0", computeStateIdle, 40, 40)
+	b, bInfo := newGPUContainer("B", "gpu-0", computeStateIdle, 60, 60)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{"A": a, "B": b}, 85, 0, 100)
+
+	if aInfo.dynamicSmLimit[0] != 40 || bInfo.dynamicSmLimit[0] != 60 {
+		t.Fatalf("all IDLE should keep floors, got %d/%d", aInfo.dynamicSmLimit[0], bInfo.dynamicSmLimit[0])
+	}
+}
+
+func TestRedistributeHeadroom_DifferentGPUsIsolated(t *testing.T) {
+	idle0, _ := newGPUContainer("idle0", "gpu-0", computeStateIdle, 40, 40)
+	busy0, busy0Info := newGPUContainer("busy0", "gpu-0", computeStateActive, 40, 40)
+	busy1, busy1Info := newGPUContainer("busy1", "gpu-1", computeStateActive, 40, 40)
+
+	redistributeHeadroomWith(map[string]*nvidia.ContainerUsage{
+		"idle0": idle0, "busy0": busy0, "busy1": busy1,
+	}, 85, 0, 100)
+
+	if busy0Info.dynamicSmLimit[0] != 60 {
+		t.Fatalf("gpu-0 busy=%d, want 60", busy0Info.dynamicSmLimit[0])
+	}
+	if busy1Info.dynamicSmLimit[0] != 40 {
+		t.Fatalf("gpu-1 busy should stay floor 40, got %d", busy1Info.dynamicSmLimit[0])
+	}
+}
+
+func TestApplyDynamicLimit_NeverBelowFloor(t *testing.T) {
+	c, info := newGPUContainer("x", "gpu-0", computeStateActive, 40, 40)
+	m := gpuMember{c: c, devIdx: 0}
+	applyDynamicLimitWith(m, 10, 0)
+	if info.dynamicSmLimit[0] != 40 {
+		t.Fatalf("dynamic=%d, want floor 40", info.dynamicSmLimit[0])
 	}
 }
