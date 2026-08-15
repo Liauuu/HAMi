@@ -18,6 +18,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Project-HAMi/HAMi/pkg/monitor/nvidia"
 )
@@ -31,8 +32,12 @@ const stubDeviceMax = 16
 // count and the trailing slots read back invalid, so the check functions walk the
 // same 16 slots they do in production.
 type stubInfo struct {
-	priority int
-	uuids    []string
+	priority       int
+	uuids          []string
+	computeState   int32
+	lastLaunchNs   uint64
+	setStateCalls  int
+	lastSetStateTo int32
 }
 
 func (s *stubInfo) DeviceMax() int { return stubDeviceMax }
@@ -59,6 +64,13 @@ func (s *stubInfo) GetRecentKernel() int32             { return 1 }
 func (s *stubInfo) SetRecentKernel(int32)              {}
 func (s *stubInfo) GetUtilizationSwitch() int32        { return 0 }
 func (s *stubInfo) SetUtilizationSwitch(int32)         {}
+func (s *stubInfo) GetComputeState() int32             { return s.computeState }
+func (s *stubInfo) SetComputeState(v int32) {
+	s.setStateCalls++
+	s.lastSetStateTo = v
+	s.computeState = v
+}
+func (s *stubInfo) GetLastLaunchNs() uint64 { return s.lastLaunchNs }
 
 func TestCheckFunctionsHighPriority(t *testing.T) {
 	sw := map[string]UtilizationPerDevice{"gpu-0": {0, 1}}
@@ -144,5 +156,164 @@ func TestCheckBlocking_MultiDevice(t *testing.T) {
 				t.Errorf("CheckPriority: want %v, got %v", test.want, got)
 			}
 		})
+	}
+}
+
+func TestUpdateComputeState_HysteresisTable(t *testing.T) {
+	const (
+		candidateNs = uint64(1000 * time.Millisecond)
+		idleNs      = uint64(2000 * time.Millisecond)
+		now         = uint64(10_000_000_000) // 10s monotonic
+	)
+
+	tests := []struct {
+		name     string
+		last     uint64
+		cur      int32
+		want     int32
+		wantSets int // 0 means no SetComputeState call expected
+	}{
+		{
+			name:     "recent launch stays/becomes ACTIVE",
+			last:     now - 100*uint64(time.Millisecond),
+			cur:      computeStateIdle,
+			want:     computeStateActive,
+			wantSets: 1,
+		},
+		{
+			name:     "between candidate and idle -> IDLE_CANDIDATE",
+			last:     now - 1500*uint64(time.Millisecond),
+			cur:      computeStateActive,
+			want:     computeStateIdleCandidate,
+			wantSets: 1,
+		},
+		{
+			name:     "past idle threshold -> IDLE",
+			last:     now - 2500*uint64(time.Millisecond),
+			cur:      computeStateIdleCandidate,
+			want:     computeStateIdle,
+			wantSets: 1,
+		},
+		{
+			name:     "exactly candidate boundary is IDLE_CANDIDATE (idleFor < candidate is ACTIVE)",
+			last:     now - candidateNs,
+			cur:      computeStateActive,
+			want:     computeStateIdleCandidate,
+			wantSets: 1,
+		},
+		{
+			name:     "exactly idle boundary is IDLE",
+			last:     now - idleNs,
+			cur:      computeStateIdleCandidate,
+			want:     computeStateIdle,
+			wantSets: 1,
+		},
+		{
+			name:     "never launched (last=0) classified IDLE",
+			last:     0,
+			cur:      computeStateActive,
+			want:     computeStateIdle,
+			wantSets: 1,
+		},
+		{
+			name:     "clock skew now<last prefers ACTIVE",
+			last:     now + 5*uint64(time.Millisecond),
+			cur:      computeStateIdle,
+			want:     computeStateActive,
+			wantSets: 1,
+		},
+		{
+			name:     "already ACTIVE and still fresh does not rewrite",
+			last:     now - 10*uint64(time.Millisecond),
+			cur:      computeStateActive,
+			want:     computeStateActive,
+			wantSets: 0,
+		},
+		{
+			name:     "already IDLE and still idle does not rewrite",
+			last:     now - 5*uint64(time.Second),
+			cur:      computeStateIdle,
+			want:     computeStateIdle,
+			wantSets: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &stubInfo{
+				computeState: tc.cur,
+				lastLaunchNs: tc.last,
+			}
+			c := &nvidia.ContainerUsage{Info: info}
+			updateComputeStateWith(c, now, candidateNs, idleNs)
+
+			if info.computeState != tc.want {
+				t.Fatalf("compute_state=%d, want %d", info.computeState, tc.want)
+			}
+			if info.setStateCalls != tc.wantSets {
+				t.Fatalf("SetComputeState calls=%d, want %d (lastSet=%d)",
+					info.setStateCalls, tc.wantSets, info.lastSetStateTo)
+			}
+			if tc.wantSets > 0 && info.lastSetStateTo != tc.want {
+				t.Fatalf("last SetComputeState arg=%d, want %d", info.lastSetStateTo, tc.want)
+			}
+		})
+	}
+}
+
+// TestUpdateComputeState_ActiveCandidateIdleActiveReplay walks the full
+// hysteresis path by only changing last_launch_ns, the same signal libvgpu
+// updates on kernel launch. This is the step-4 acceptance sequence.
+func TestUpdateComputeState_ActiveCandidateIdleActiveReplay(t *testing.T) {
+	const (
+		candidateNs = uint64(1000 * time.Millisecond)
+		idleNs      = uint64(2000 * time.Millisecond)
+		now         = uint64(20_000_000_000)
+	)
+
+	info := &stubInfo{
+		computeState: computeStateUnset,
+		lastLaunchNs: now, // just launched
+	}
+	c := &nvidia.ContainerUsage{PodUID: "pod", ContainerName: "ctr", Info: info}
+
+	updateComputeStateWith(c, now, candidateNs, idleNs)
+	if info.computeState != computeStateActive {
+		t.Fatalf("after fresh launch: state=%d, want ACTIVE(%d)", info.computeState, computeStateActive)
+	}
+
+	info.lastLaunchNs = now - 1500*uint64(time.Millisecond)
+	updateComputeStateWith(c, now, candidateNs, idleNs)
+	if info.computeState != computeStateIdleCandidate {
+		t.Fatalf("after 1.5s idle: state=%d, want IDLE_CANDIDATE(%d)", info.computeState, computeStateIdleCandidate)
+	}
+
+	info.lastLaunchNs = now - 2500*uint64(time.Millisecond)
+	updateComputeStateWith(c, now, candidateNs, idleNs)
+	if info.computeState != computeStateIdle {
+		t.Fatalf("after 2.5s idle: state=%d, want IDLE(%d)", info.computeState, computeStateIdle)
+	}
+
+	// Kernel launches again: libvgpu would bump last_launch_ns to "now".
+	info.lastLaunchNs = now
+	updateComputeStateWith(c, now, candidateNs, idleNs)
+	if info.computeState != computeStateActive {
+		t.Fatalf("after relaunch: state=%d, want ACTIVE(%d)", info.computeState, computeStateActive)
+	}
+}
+
+func TestUpdateComputeState_ThresholdSanity(t *testing.T) {
+	// If misconfigured idle < candidate, implementation must clamp so the
+	// candidate window does not invert (threshold becomes max(idle, candidate)).
+	const now = uint64(5_000_000_000)
+	info := &stubInfo{
+		computeState: computeStateActive,
+		lastLaunchNs: now - 1500*uint64(time.Millisecond),
+	}
+	c := &nvidia.ContainerUsage{Info: info}
+
+	updateComputeStateWith(c, now, 2000*uint64(time.Millisecond), 1000*uint64(time.Millisecond))
+	if info.computeState != computeStateActive {
+		t.Fatalf("with clamped thresholds, 1.5s idle should stay ACTIVE, got %d", info.computeState)
 	}
 }

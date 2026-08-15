@@ -82,7 +82,6 @@ type sharedRegionT struct {
 	lastKernelTime    int64
 	unused            [4]uint64 // mirrors libvgpu sem_postinit (sizeof(sem_t)==32)
 	// Elastic SM limit ABI (libvgpu shared_region_t minor >= 3).
-	// Stored only in step-1; limiter/monitor do not consume these yet.
 	computeState     int32
 	computeStatePad  int32
 	lastLaunchNs     uint64
@@ -216,4 +215,16 @@ func (s Spec) GetUtilizationSwitch() int32 {
 
 func (s Spec) SetUtilizationSwitch(v int32) {
 	s.sr.utilizationSwitch = v
+}
+
+func (s Spec) GetComputeState() int32 {
+	return s.sr.computeState
+}
+
+func (s Spec) SetComputeState(v int32) {
+	s.sr.computeState = v
+}
+
+func (s Spec) GetLastLaunchNs() uint64 {
+	return s.sr.lastLaunchNs
 }

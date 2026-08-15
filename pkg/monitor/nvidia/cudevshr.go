@@ -71,6 +71,9 @@ type UsageInfo interface {
 	SetRecentKernel(v int32)
 	GetUtilizationSwitch() int32
 	SetUtilizationSwitch(v int32)
+	GetComputeState() int32
+	SetComputeState(v int32)
+	GetLastLaunchNs() uint64
 }
 
 type ContainerUsage struct {

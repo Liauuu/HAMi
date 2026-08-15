@@ -20,9 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 
 	"github.com/Project-HAMi/HAMi/pkg/monitor/nvidia"
@@ -30,12 +33,62 @@ import (
 
 var errTemporaryClosed = errors.New("temporary closed")
 
+// Compute-state values mirrored from HAMi-core COMPUTE_STATE_*.
+const (
+	computeStateUnset         int32 = 0
+	computeStateActive        int32 = 1
+	computeStateIdleCandidate int32 = 2
+	computeStateIdle          int32 = 3
+)
+
+const (
+	defaultIdleCandidateMs = 1000
+	defaultIdleMs          = 2000
+)
+
 //type hostGPUPid struct {
 //	hostGPUPid int
 //	mtime      uint64
 //}
 
 type UtilizationPerDevice []int
+
+var (
+	idleCandidateNs  uint64
+	idleThresholdNs  uint64
+)
+
+func init() {
+	idleCandidateNs = uint64(envDurationMs("HAMI_COMPUTE_IDLE_CANDIDATE_MS", defaultIdleCandidateMs)) * uint64(time.Millisecond)
+	idleThresholdNs = uint64(envDurationMs("HAMI_COMPUTE_IDLE_MS", defaultIdleMs)) * uint64(time.Millisecond)
+	if idleThresholdNs < idleCandidateNs {
+		klog.Warningf("HAMI_COMPUTE_IDLE_MS < HAMI_COMPUTE_IDLE_CANDIDATE_MS; raising idle to candidate (%d ms)", idleCandidateNs/uint64(time.Millisecond))
+		idleThresholdNs = idleCandidateNs
+	}
+}
+
+func envDurationMs(name string, def int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		klog.Warningf("invalid %s=%q, using default %d", name, raw, def)
+		return def
+	}
+	return v
+}
+
+func monotonicNowNs() uint64 {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC_COARSE, &ts); err != nil {
+		if err2 := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err2 != nil {
+			return 0
+		}
+	}
+	return uint64(ts.Sec)*uint64(time.Second) + uint64(ts.Nsec)
+}
 
 func CheckBlocking(utSwitchOn map[string]UtilizationPerDevice, p int, c *nvidia.ContainerUsage) bool {
 	for i := range c.Info.DeviceMax() {
@@ -71,9 +124,55 @@ func CheckPriority(utSwitchOn map[string]UtilizationPerDevice, p int, c *nvidia.
 	return false
 }
 
+// updateComputeState applies hysteresis idle transitions only.
+// It does not touch dynamic_sm_limit / headroom (that is a later step).
+func updateComputeState(c *nvidia.ContainerUsage, nowNs uint64) {
+	updateComputeStateWith(c, nowNs, idleCandidateNs, idleThresholdNs)
+}
+
+func updateComputeStateWith(c *nvidia.ContainerUsage, nowNs, candidateNs, thresholdNs uint64) {
+	if thresholdNs < candidateNs {
+		thresholdNs = candidateNs
+	}
+
+	last := c.Info.GetLastLaunchNs()
+	var idleFor uint64
+	switch {
+	case last == 0:
+		// Never launched (or legacy cache): treat as fully idle for classification.
+		idleFor = thresholdNs
+	case nowNs >= last:
+		idleFor = nowNs - last
+	default:
+		// Clock quirk / cross-process mismatch: prefer ACTIVE.
+		idleFor = 0
+	}
+
+	var next int32
+	switch {
+	case idleFor < candidateNs:
+		next = computeStateActive
+	case idleFor < thresholdNs:
+		next = computeStateIdleCandidate
+	default:
+		next = computeStateIdle
+	}
+
+	cur := c.Info.GetComputeState()
+	if cur == next {
+		return
+	}
+	if cur != computeStateUnset {
+		klog.V(5).Infof("compute_state %s/%s %d -> %d (idleFor=%dns last=%d)",
+			c.PodUID, c.ContainerName, cur, next, idleFor, last)
+	}
+	c.Info.SetComputeState(next)
+}
+
 func Observe(lister *nvidia.ContainerLister) {
 	utSwitchOn := map[string]UtilizationPerDevice{}
 	containers := lister.ListContainers()
+	nowNs := monotonicNowNs()
 
 	for _, c := range containers {
 		recentKernel := c.Info.GetRecentKernel()
@@ -101,6 +200,9 @@ func Observe(lister *nvidia.ContainerLister) {
 		}
 	}
 	for idx, c := range containers {
+		// Idle state machine only — no headroom / dynamic_sm_limit writes.
+		updateComputeState(c, nowNs)
+
 		priority := c.Info.GetPriority()
 		recentKernel := c.Info.GetRecentKernel()
 		utilizationSwitch := c.Info.GetUtilizationSwitch()

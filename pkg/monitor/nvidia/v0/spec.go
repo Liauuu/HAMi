@@ -190,3 +190,10 @@ func (s Spec) GetUtilizationSwitch() int32 {
 func (s Spec) SetUtilizationSwitch(v int32) {
 	s.sr.utilizationSwitch = v
 }
+
+// Legacy v0 caches have no elastic fields; treat as unset/no-op.
+func (s Spec) GetComputeState() int32 { return 0 }
+func (s Spec) SetComputeState(int32)  {}
+func (s Spec) GetLastLaunchNs() uint64 {
+	return 0
+}
