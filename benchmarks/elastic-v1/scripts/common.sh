@@ -89,6 +89,6 @@ sample_nvsmi() {
       echo "${ts},${util:-NA}" >>"${out}"
       sleep 0.2
     done
-  ) &
+   ) >/dev/null 2>&1 &
   echo $!
 }

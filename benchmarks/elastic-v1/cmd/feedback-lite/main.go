@@ -161,7 +161,7 @@ func main() {
 				LastLaunchNs: c.Info.GetLastLaunchNs(),
 			}
 			for i := range c.Info.DeviceMax() {
-				if !c.Info.IsValidUUID(i) {
+				if !c.Info.IsValidUUID(i) && i > 0 {
 					continue
 				}
 				sc.UUID = strings.TrimRight(c.Info.DeviceUUID(i), "\x00")
