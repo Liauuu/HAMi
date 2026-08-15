@@ -1,5 +1,3 @@
 bin/
 .run/
 *.o
-sm_burn
-feedback-lite
