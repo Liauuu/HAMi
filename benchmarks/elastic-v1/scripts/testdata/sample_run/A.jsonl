@@ -1,0 +1,2 @@
+{"event":"tick","name":"A","mode":"idle","iters":0,"iters_per_s":0.0,"t_s":1.0}
+{"event":"done","name":"A","iters":0,"t_s":2.0}

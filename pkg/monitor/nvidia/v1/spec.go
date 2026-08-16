@@ -80,7 +80,13 @@ type sharedRegionT struct {
 	recentKernel      int32
 	priority          int32
 	lastKernelTime    int64
-	unused            [4]uint64
+	unused            [4]uint64 // mirrors libvgpu sem_postinit (sizeof(sem_t)==32)
+	// Elastic SM limit ABI (libvgpu shared_region_t minor >= 3).
+	computeState    int32
+	computeStatePad int32
+	lastLaunchNs    uint64
+	floorSmLimit    [16]uint64
+	dynamicSmLimit  [16]uint64
 }
 
 type Spec struct {
@@ -233,4 +239,44 @@ func (s Spec) GetUtilizationSwitch() int32 {
 
 func (s Spec) SetUtilizationSwitch(v int32) {
 	s.sr.utilizationSwitch = v
+}
+
+func (s Spec) GetComputeState() int32 {
+	return s.sr.computeState
+}
+
+func (s Spec) SetComputeState(v int32) {
+	s.sr.computeState = v
+}
+
+func (s Spec) GetLastLaunchNs() uint64 {
+	return s.sr.lastLaunchNs
+}
+
+func (s Spec) GetDeviceSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= maxDevices {
+		return 0
+	}
+	return s.sr.smLimit[idx]
+}
+
+func (s Spec) GetFloorSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= maxDevices {
+		return 0
+	}
+	return s.sr.floorSmLimit[idx]
+}
+
+func (s Spec) GetDynamicSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= maxDevices {
+		return 0
+	}
+	return s.sr.dynamicSmLimit[idx]
+}
+
+func (s Spec) SetDynamicSmLimit(idx int, v uint64) {
+	if idx < 0 || idx >= maxDevices {
+		return
+	}
+	s.sr.dynamicSmLimit[idx] = v
 }

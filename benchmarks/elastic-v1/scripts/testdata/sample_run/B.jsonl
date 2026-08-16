@@ -1,0 +1,3 @@
+{"event":"tick","name":"B","mode":"busy","iters":100,"iters_per_s":500.0,"t_s":1.0}
+{"event":"tick","name":"B","mode":"busy","iters":200,"iters_per_s":520.0,"t_s":2.0}
+{"event":"done","name":"B","iters":200,"t_s":2.0}

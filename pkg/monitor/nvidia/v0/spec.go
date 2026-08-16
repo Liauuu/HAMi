@@ -218,3 +218,21 @@ func (s Spec) GetUtilizationSwitch() int32 {
 func (s Spec) SetUtilizationSwitch(v int32) {
 	s.sr.utilizationSwitch = v
 }
+
+// Legacy v0 caches have no elastic fields; treat as unset/no-op.
+func (s Spec) GetComputeState() int32 { return 0 }
+func (s Spec) SetComputeState(int32)  {}
+func (s Spec) GetLastLaunchNs() uint64 {
+	return 0
+}
+func (s Spec) GetDeviceSmLimit(idx int) uint64 {
+	if idx < 0 || idx >= maxDevices {
+		return 0
+	}
+	return s.sr.smLimit[idx]
+}
+func (s Spec) GetFloorSmLimit(int) uint64 { return 0 }
+func (s Spec) GetDynamicSmLimit(int) uint64 {
+	return 0
+}
+func (s Spec) SetDynamicSmLimit(int, uint64) {}

@@ -59,13 +59,19 @@ func TestSharedRegionTLayoutMatchesCABI(t *testing.T) {
 		{"recentKernel", unsafe.Offsetof(s.recentKernel), 2008904},
 		{"priority", unsafe.Offsetof(s.priority), 2008908},
 		{"lastKernelTime", unsafe.Offsetof(s.lastKernelTime), 2008912},
+		{"unused", unsafe.Offsetof(s.unused), 2008920},
+		{"computeState", unsafe.Offsetof(s.computeState), 2008952},
+		{"computeStatePad", unsafe.Offsetof(s.computeStatePad), 2008956},
+		{"lastLaunchNs", unsafe.Offsetof(s.lastLaunchNs), 2008960},
+		{"floorSmLimit", unsafe.Offsetof(s.floorSmLimit), 2008968},
+		{"dynamicSmLimit", unsafe.Offsetof(s.dynamicSmLimit), 2009096},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
 			t.Errorf("field %s at offset %d, want %d (libvgpu shared_region_t layout has drifted)", c.field, c.got, c.want)
 		}
 	}
-	assert.Equal(t, int(unsafe.Sizeof(s)), 2008952)
+	assert.Equal(t, int(unsafe.Sizeof(s)), 2009224)
 }
 
 func Test_CastSpec(t *testing.T) {

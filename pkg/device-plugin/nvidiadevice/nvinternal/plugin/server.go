@@ -820,12 +820,26 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 			}
 
 			if plugin.operatingMode != "mig" {
+				containerBaseDir := fmt.Sprintf("%s/vgpu/containers/%s_%s", hostHookPath, current.UID, currentCtr.Name)
+				// Keep SoT outside the writable vGPU mount so the container cannot rewrite limits.
+				cacheFileHostDirectory := filepath.Join(containerBaseDir, "data")
+				configHostDirectory := filepath.Join(containerBaseDir, "config")
+				// Container-visible fixed paths (SoT discovery uses a path baked into libvgpu).
+				cacheContainerPath := fmt.Sprintf("%s/vgpu/usage.cache", hostHookPath)
+				runtimeConfigContainerPath := "/etc/hami/runtime.conf"
+				runtimeConfigHostPath := filepath.Join(configHostDirectory, "runtime.conf")
+
+				var runtimeConf strings.Builder
 				for i, dev := range devreq {
 					limitKey := fmt.Sprintf("CUDA_DEVICE_MEMORY_LIMIT_%v", i)
-					response.Envs[limitKey] = fmt.Sprintf("%vm", dev.Usedmem)
+					limitVal := fmt.Sprintf("%vm", dev.Usedmem)
+					response.Envs[limitKey] = limitVal // legacy compat; libvgpu SoT is the RO file
+					fmt.Fprintf(&runtimeConf, "%s=%s\n", limitKey, limitVal)
 				}
 				response.Envs["CUDA_DEVICE_SM_LIMIT"] = fmt.Sprint(devreq[0].Usedcores)
-				response.Envs["CUDA_DEVICE_MEMORY_SHARED_CACHE"] = fmt.Sprintf("%s/vgpu/%v.cache", hostHookPath, uuid.New().String())
+				fmt.Fprintf(&runtimeConf, "CUDA_DEVICE_SM_LIMIT=%s\n", response.Envs["CUDA_DEVICE_SM_LIMIT"])
+				response.Envs["CUDA_DEVICE_MEMORY_SHARED_CACHE"] = cacheContainerPath
+				fmt.Fprintf(&runtimeConf, "CUDA_DEVICE_MEMORY_SHARED_CACHE=%s\n", cacheContainerPath)
 				if *plugin.schedulerConfig.DeviceMemoryScaling > 1 {
 					response.Envs["CUDA_OVERSUBSCRIBE"] = "true"
 				}
@@ -835,13 +849,17 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 				if plugin.schedulerConfig.DisableCoreLimit {
 					response.Envs[util.CoreLimitSwitch] = "disable"
 				}
-				cacheFileHostDirectory := fmt.Sprintf("%s/vgpu/containers/%s_%s", hostHookPath, current.UID, currentCtr.Name)
-				os.RemoveAll(cacheFileHostDirectory)
+				os.RemoveAll(containerBaseDir)
 
 				os.MkdirAll(cacheFileHostDirectory, 0777)
 				os.Chmod(cacheFileHostDirectory, 0777)
+				os.MkdirAll(configHostDirectory, 0755)
 				os.MkdirAll("/tmp/vgpulock", 0777)
 				os.Chmod("/tmp/vgpulock", 0777)
+				if err := os.WriteFile(runtimeConfigHostPath, []byte(runtimeConf.String()), 0444); err != nil {
+					PodAllocationFailed(nodename, current, NodeLockNvidia)
+					return nil, fmt.Errorf("failed to write HAMi runtime SoT %s: %v", runtimeConfigHostPath, err)
+				}
 				response.Mounts = append(response.Mounts,
 					&kubeletdevicepluginv1beta1.Mount{ContainerPath: fmt.Sprintf("%s/vgpu/libvgpu.so", hostHookPath),
 						HostPath: GetLibPath(),
@@ -849,6 +867,9 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 					&kubeletdevicepluginv1beta1.Mount{ContainerPath: fmt.Sprintf("%s/vgpu", hostHookPath),
 						HostPath: cacheFileHostDirectory,
 						ReadOnly: false},
+					&kubeletdevicepluginv1beta1.Mount{ContainerPath: runtimeConfigContainerPath,
+						HostPath: runtimeConfigHostPath,
+						ReadOnly: true},
 					&kubeletdevicepluginv1beta1.Mount{ContainerPath: "/tmp/vgpulock",
 						HostPath: "/tmp/vgpulock",
 						ReadOnly: false},

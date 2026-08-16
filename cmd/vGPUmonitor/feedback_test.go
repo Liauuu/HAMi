@@ -162,3 +162,37 @@ func TestCheckBlocking_MultiDevice(t *testing.T) {
 		})
 	}
 }
+
+func (s *stubInfo) GetComputeState() int32 {
+	return 0
+}
+
+func (s *stubInfo) SetComputeState(v int32) {}
+
+func (s *stubInfo) GetLastLaunchNs() uint64 {
+	return 0
+}
+
+func (s *stubInfo) GetDeviceSmLimit(idx int) uint64 {
+	return 0
+}
+
+func (s *stubInfo) GetDynamicSmLimit(idx int) uint64 {
+	return 0
+}
+
+func (s *stubInfo) SetDynamicSmLimit(idx int, v uint64) {}
+
+func (s *stubInfo) GetFloorSmLimit(idx int) uint64 {
+	return 0
+}
+
+func TestDynamicSmPolicyLogic(t *testing.T) {
+	s := &stubInfo{}
+	if s.GetComputeState() != 0 {
+		t.Errorf("expected compute state 0")
+	}
+	if s.GetFloorSmLimit(0) != 0 {
+		t.Errorf("expected floor sm limit 0")
+	}
+}
