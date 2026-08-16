@@ -61,6 +61,9 @@ func MonotonicNowNs() uint64 {
 
 // UpdateComputeState applies hysteresis idle transitions for one container.
 func UpdateComputeState(c *ContainerUsage, nowNs, candidateNs, thresholdNs uint64) {
+	if c == nil || c.Info == nil {
+		return
+	}
 	if thresholdNs < candidateNs {
 		thresholdNs = candidateNs
 	}

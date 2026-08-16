@@ -331,7 +331,7 @@ func loadCache(fpath string) (*ContainerUsage, error) {
 	if info.Size() == 1197897 {
 		klog.Infoln("casting......v0")
 		usage.Info = v0.CastSpec(usage.data)
-	} else if head.majorVersion == 1 && info.Size() >= int64(v1.MinSize()) {
+	} else if info.Size() == 2008953 || (head.majorVersion == 1 && info.Size() >= int64(v1.MinSize())) {
 		klog.Infoln("casting......v1")
 		usage.Info = v1.CastSpec(usage.data)
 	} else {
