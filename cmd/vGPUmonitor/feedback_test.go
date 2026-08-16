@@ -18,6 +18,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Project-HAMi/HAMi/pkg/monitor/nvidia"
 )
@@ -163,36 +164,76 @@ func TestCheckBlocking_MultiDevice(t *testing.T) {
 	}
 }
 
-func (s *stubInfo) GetComputeState() int32 {
-	return 0
-}
+func (s *stubInfo) GetComputeState() int32        { return 0 }
+func (s *stubInfo) SetComputeState(int32)         {}
+func (s *stubInfo) GetLastLaunchNs() uint64       { return 0 }
+func (s *stubInfo) GetDeviceSmLimit(int) uint64   { return 0 }
+func (s *stubInfo) GetDynamicSmLimit(int) uint64  { return 0 }
+func (s *stubInfo) SetDynamicSmLimit(int, uint64) {}
+func (s *stubInfo) GetFloorSmLimit(int) uint64    { return 0 }
 
-func (s *stubInfo) SetComputeState(v int32) {}
-
-func (s *stubInfo) GetLastLaunchNs() uint64 {
-	return 0
-}
-
-func (s *stubInfo) GetDeviceSmLimit(idx int) uint64 {
-	return 0
-}
-
-func (s *stubInfo) GetDynamicSmLimit(idx int) uint64 {
-	return 0
-}
-
-func (s *stubInfo) SetDynamicSmLimit(idx int, v uint64) {}
-
-func (s *stubInfo) GetFloorSmLimit(idx int) uint64 {
-	return 0
-}
-
-func TestDynamicSmPolicyLogic(t *testing.T) {
-	s := &stubInfo{}
-	if s.GetComputeState() != 0 {
-		t.Errorf("expected compute state 0")
+func TestClampTickMs(t *testing.T) {
+	if got := clampTickMs("HAMI_COMPUTE_LIGHT_TICK_MS_UNSET_TEST", 200, 50, 0); got != 200*time.Millisecond {
+		t.Fatalf("default light tick=%v, want 200ms", got)
 	}
-	if s.GetFloorSmLimit(0) != 0 {
-		t.Errorf("expected floor sm limit 0")
+	t.Setenv("HAMI_COMPUTE_LIGHT_TICK_MS_CLAMP_LOW", "10")
+	if got := clampTickMs("HAMI_COMPUTE_LIGHT_TICK_MS_CLAMP_LOW", 200, 50, 0); got != 50*time.Millisecond {
+		t.Fatalf("below-min clamp=%v, want 50ms", got)
+	}
+	t.Setenv("HAMI_COMPUTE_HEAVY_TICK_MS_CLAMP_HIGH", "99999")
+	if got := clampTickMs("HAMI_COMPUTE_HEAVY_TICK_MS_CLAMP_HIGH", 5000, 1000, 10000); got != 10*time.Second {
+		t.Fatalf("above-max clamp=%v, want 10s", got)
 	}
 }
+
+func TestObservePriorityFeedback_DecrementsRecentKernel(t *testing.T) {
+	info := &priorityStub{uuids: []string{"gpu-0"}, recentKernel: 2}
+	c := &nvidia.ContainerUsage{PodUID: "x", ContainerName: "x", Info: info}
+	observePriorityFeedback(map[string]*nvidia.ContainerUsage{"x": c})
+	if info.setRecentKernelN == 0 || info.recentKernel != 1 {
+		t.Fatalf("heavy path should decrement recent_kernel to 1, got calls=%d value=%d",
+			info.setRecentKernelN, info.recentKernel)
+	}
+}
+
+// priorityStub is a UsageInfo that records recent_kernel writes.
+type priorityStub struct {
+	uuids            []string
+	recentKernel     int32
+	setRecentKernelN int
+}
+
+func (s *priorityStub) DeviceMax() int { return stubDeviceMax }
+func (s *priorityStub) DeviceNum() int { return len(s.uuids) }
+func (s *priorityStub) DeviceUUID(i int) string {
+	if i < len(s.uuids) {
+		return s.uuids[i]
+	}
+	return ""
+}
+func (s *priorityStub) DeviceMemoryContextSize(int) uint64 { return 0 }
+func (s *priorityStub) DeviceMemoryModuleSize(int) uint64  { return 0 }
+func (s *priorityStub) DeviceMemoryBufferSize(int) uint64  { return 0 }
+func (s *priorityStub) DeviceMemoryOffset(int) uint64      { return 0 }
+func (s *priorityStub) DeviceMemoryTotal(int) uint64       { return 0 }
+func (s *priorityStub) DeviceSmUtil(int) uint64            { return 0 }
+func (s *priorityStub) SetDeviceSmLimit(uint64)            {}
+func (s *priorityStub) IsValidUUID(i int) bool             { return i < len(s.uuids) }
+func (s *priorityStub) DeviceMemoryLimit(int) uint64       { return 0 }
+func (s *priorityStub) SetDeviceMemoryLimit(uint64)        {}
+func (s *priorityStub) LastKernelTime() int64              { return 0 }
+func (s *priorityStub) GetPriority() int                   { return 0 }
+func (s *priorityStub) GetRecentKernel() int32             { return s.recentKernel }
+func (s *priorityStub) SetRecentKernel(v int32) {
+	s.setRecentKernelN++
+	s.recentKernel = v
+}
+func (s *priorityStub) GetUtilizationSwitch() int32   { return 0 }
+func (s *priorityStub) SetUtilizationSwitch(int32)    {}
+func (s *priorityStub) GetComputeState() int32        { return 0 }
+func (s *priorityStub) SetComputeState(int32)         {}
+func (s *priorityStub) GetLastLaunchNs() uint64       { return 0 }
+func (s *priorityStub) GetDeviceSmLimit(int) uint64   { return 0 }
+func (s *priorityStub) GetDynamicSmLimit(int) uint64  { return 0 }
+func (s *priorityStub) SetDynamicSmLimit(int, uint64) {}
+func (s *priorityStub) GetFloorSmLimit(int) uint64    { return 0 }
